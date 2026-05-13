@@ -181,7 +181,7 @@ Student level: {level}/10
 Requirements:
 - The challenge should be appropriately difficult for level {level}
 - Include any necessary context/setup
-- End with: "Take your time. Reply with your approach — code, pseudocode, or just your thinking."
+- End with: "Take your time. Reply with your approach, code, pseudocode, or just your thinking."
 - Keep it under 200 words total
 
 Output only the challenge message, nothing else."""
@@ -237,7 +237,7 @@ async def cmd_progress(command: str) -> str:
     if not summary:
         return "No roadmap found. Your progress tracker is empty."
 
-    msg = "📊 *Your Progress*\n\n"
+    msg = "*Your Progress*\n\n"
     for domain in domains:
         domain_topics = [t for t in summary if t["domain"] == domain]
         if not domain_topics:
@@ -249,7 +249,7 @@ async def cmd_progress(command: str) -> str:
         msg += f"  {done}/{total} topics mastered\n"
         in_progress = [t for t in domain_topics if t["status"] == "in_progress"]
         if in_progress:
-            msg += f"  Currently: {in_progress[0]['topic']}\n"
+            msg += f"  Currently on: {in_progress[0]['topic']}\n"
         msg += "\n"
 
     return msg.strip()
@@ -260,7 +260,7 @@ async def cmd_status(command: str) -> str:
     assessments = profile.get("assessments", {})
     domains = profile.get("domains", [])
 
-    msg = "⚡ *Quick Status*\n\n"
+    msg = "*Status*\n\n"
     for d in domains:
         lvl = assessments.get(d, {}).get("level", 1)
         bar = "█" * lvl + "░" * (10 - lvl)
@@ -271,15 +271,15 @@ async def cmd_status(command: str) -> str:
 
 async def cmd_help(command: str) -> str:
     return (
-        "🤖 *UpskillBot Commands*\n\n"
-        "/challenge — get a practice challenge\n"
-        "/challenge dsa — challenge for a specific domain\n"
-        "/concept — get a concept explanation\n"
-        "/concept ml — concept for a specific domain\n"
-        "/progress — full roadmap progress\n"
-        "/status — quick level overview\n"
-        "/topic — see what's next on your roadmap\n\n"
-        "Or just *chat with me* — ask questions, discuss topics, or ask me to explain anything!"
+        "*Commands*\n\n"
+        "/challenge, get a practice problem\n"
+        "/challenge dsa, challenge for a specific domain\n"
+        "/concept, get a concept explained\n"
+        "/concept ml, concept for a specific domain\n"
+        "/progress, full roadmap progress\n"
+        "/status, quick level overview\n"
+        "/topic, see what's next on your roadmap\n\n"
+        "Or just chat, ask questions, work through topics, whatever you need."
     )
 
 
@@ -288,7 +288,7 @@ async def cmd_topic(command: str) -> str:
     domains = profile.get("domains", [])
     summary = get_roadmap_summary()
 
-    msg = "🗺 *Next Topics*\n\n"
+    msg = "*Next Topics*\n\n"
     for domain in domains:
         pending = [t for t in summary if t["domain"] == domain and t["status"] != "mastered"]
         if pending:

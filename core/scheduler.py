@@ -95,7 +95,7 @@ async def _daily_nudge_job():
     try:
         from agents.orchestrator import cmd_progress
         progress = await cmd_progress("/progress")
-        nudge = f"📅 *Daily Check-in*\n\n{progress}\n\nKeep it up — consistency beats intensity! 💪"
+        nudge = f"*Daily check-in*\n\n{progress}\n\nConsistency is what moves the needle. Keep going."
         await _send_callback(nudge)
     except Exception as e:
         logger.error(f"Daily nudge failed: {e}")
