@@ -96,3 +96,33 @@ def get_onboarding_state() -> dict:
 
 def save_onboarding_state(state: dict):
     write_json_memory("onboarding_state.json", state)
+
+
+def get_session() -> dict:
+    return read_json_memory("session.json")
+
+
+def save_session(data: dict):
+    write_json_memory("session.json", data)
+
+
+def clear_session():
+    write_json_memory("session.json", {})
+
+
+def get_session_summary() -> str:
+    data = read_json_memory("session_summary.json")
+    return data.get("summary", "")
+
+
+def save_session_summary(summary: str):
+    write_json_memory("session_summary.json", {"summary": summary})
+
+
+def get_last_response() -> str:
+    data = read_json_memory("last_response.json")
+    return data.get("content", "")
+
+
+def save_last_response(content: str):
+    write_json_memory("last_response.json", {"content": content})

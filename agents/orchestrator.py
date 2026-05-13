@@ -4,13 +4,14 @@ import json
 import random
 from datetime import datetime
 from core import (
-    run_claude,
+    run_claude, run_claude_in_session,
     get_user_profile,
-    get_conversation_history, append_message,
     get_roadmap, is_onboarded,
     log_session, log_challenge, log_concept,
     update_roadmap as tracker_update_roadmap,
     get_roadmap_summary,
+    get_last_response, save_last_response,
+    clear_session, save_session_summary,
 )
 from agents.personas import (
     COACH_BASE,
@@ -48,20 +49,17 @@ async def handle_command(command: str) -> str:
 
 async def handle_chat(user_message: str) -> str:
     profile = get_user_profile()
-    history = get_conversation_history()
+    last_response = get_last_response()
 
-    if _is_challenge_response(history, user_message):
-        return await evaluate_challenge_response(user_message, history, profile)
-
-    append_message("user", user_message)
-    history = get_conversation_history()
+    if _is_challenge_response(last_response, user_message):
+        return await evaluate_challenge_response(user_message, last_response, profile)
 
     system = _build_coach_system(profile)
-    response = await run_claude(_format_history_prompt(history), system=system, timeout=90)
+    response = await run_claude_in_session(user_message, system=system, timeout=90)
 
-    append_message("assistant", response)
+    save_last_response(response)
     log_session(
-        domain=_detect_domain_from_context(history, profile),
+        domain=_detect_domain_from_profile(profile),
         topic="general",
         session_type="chat",
         summary=user_message[:100],
@@ -69,21 +67,15 @@ async def handle_chat(user_message: str) -> str:
     return response
 
 
-def _is_challenge_response(history: list, message: str) -> bool:
-    if not history:
+def _is_challenge_response(last_assistant: str, message: str) -> bool:
+    if not last_assistant:
         return False
-    last_assistant = next(
-        (m["content"] for m in reversed(history) if m["role"] == "assistant"), ""
-    )
     markers = ["take your time", "reply with your approach", "try this", "your turn", "solve this"]
     return any(m in last_assistant.lower() for m in markers)
 
 
-async def evaluate_challenge_response(response: str, history: list, profile: dict) -> str:
-    last_challenge = next(
-        (m["content"] for m in reversed(history) if m["role"] == "assistant"), ""
-    )
-    domain = _detect_domain_from_context(history, profile)
+async def evaluate_challenge_response(response: str, last_challenge: str, profile: dict) -> str:
+    domain = _detect_domain_from_profile(profile)
     persona = get_persona(domain)
 
     eval_prompt = f"""A student is attempting a challenge. Evaluate their response.
@@ -117,8 +109,7 @@ Respond with JSON:
     score = data.get("score", 5)
     topic = data.get("topic", "general")
 
-    append_message("user", response)
-    append_message("assistant", evaluation_text)
+    save_last_response(evaluation_text)
 
     log_challenge(
         domain=domain, topic=topic,
@@ -186,7 +177,7 @@ Requirements:
 Output only the challenge message, nothing else."""
 
     challenge = await run_claude(challenge_prompt, system=persona, timeout=60)
-    append_message("assistant", challenge)
+    save_last_response(challenge)
     log_session(domain=domain, topic=topic, session_type="challenge", summary=f"Level {level} challenge")
     return challenge
 
@@ -227,7 +218,7 @@ Format for Telegram:
 Keep it under 300 words."""
 
     explanation = await run_claude(concept_prompt, system=persona, timeout=90)
-    append_message("assistant", explanation)
+    save_last_response(explanation)
     log_concept(domain=domain, topic=topic, title=topic, summary=explanation[:200])
     return explanation
 
@@ -352,27 +343,8 @@ def _build_coach_system(profile: dict) -> str:
     )
 
 
-def _format_history_prompt(history: list) -> str:
-    lines = []
-    for m in history[-10:]:
-        role = "User" if m["role"] == "user" else "Assistant"
-        lines.append(f"{role}: {m['content']}")
-    return "\n\n".join(lines) + "\n\nContinue as the assistant."
-
-
-def _detect_domain_from_context(history: list, profile: dict) -> str:
-    """Try to detect the active domain from recent conversation context."""
+def _detect_domain_from_profile(profile: dict) -> str:
     domains = profile.get("domains", [])
     if not domains:
         return "general"
-
-    recent = " ".join(m["content"].lower() for m in history[-4:])
-    domain_display = profile.get("domain_display", {})
-
-    # Check if any domain's display name or key appears in recent messages
-    for key in domains:
-        display = domain_display.get(key, key).lower()
-        if key in recent or display in recent:
-            return key
-
     return random.choice(domains)

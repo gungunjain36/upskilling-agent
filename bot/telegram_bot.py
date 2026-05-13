@@ -7,7 +7,7 @@ from telegram.ext import (
 from config import settings
 from agents import handle_message
 from core.scheduler import set_send_callback, start_scheduler, reschedule
-from core.memory import get_schedule_config
+from core.memory import get_schedule_config, clear_session, save_session_summary
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,14 @@ async def _start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(response, parse_mode="Markdown")
 
 
+async def _newsession_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != int(settings.telegram_chat_id):
+        return
+    clear_session()
+    save_session_summary("")
+    await update.message.reply_text("Session cleared. Next message starts a fresh context.")
+
+
 async def _reschedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != int(settings.telegram_chat_id):
         return
@@ -106,6 +114,7 @@ def setup_bot() -> Application:
     app = get_application()
 
     app.add_handler(CommandHandler("start", _start_command))
+    app.add_handler(CommandHandler("newsession", _newsession_command))
     app.add_handler(CommandHandler("reschedule", _reschedule_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _route_message))
     app.add_handler(MessageHandler(filters.COMMAND, _route_message))
