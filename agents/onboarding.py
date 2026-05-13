@@ -1,31 +1,15 @@
-"""Multi-step onboarding flow to profile the user and build their roadmap."""
+"""Multi-step onboarding flow. Fully dynamic, no hardcoded domains."""
 
 import json
 from datetime import datetime
 from core import (
     run_claude,
     get_onboarding_state, save_onboarding_state,
-    get_user_profile, save_user_profile,
+    save_user_profile,
     save_roadmap, save_schedule_config,
     update_profile_in_tracker, update_roadmap, init_tracker,
 )
-
-ONBOARDING_STEPS = [
-    "greeting",
-    "goals",
-    "domains",
-    "level_assessment",
-    "schedule",
-    "confirm",
-    "done",
-]
-
-DOMAIN_OPTIONS = {
-    "1": "dsa",
-    "2": "ml",
-    "3": "system_design",
-    "4": "ai_engineering",
-}
+from agents.personas import generate_persona, save_persona, get_assessment_question
 
 
 async def handle_onboarding(user_message: str) -> str:
@@ -36,8 +20,11 @@ async def handle_onboarding(user_message: str) -> str:
         return await _step_greeting(state)
     elif step == "goals":
         return await _step_goals(state, user_message)
-    elif step == "domains":
-        return await _step_domains(state, user_message)
+    elif step == "topics":
+        return await _step_topics(state, user_message)
+    elif step == "generating_personas":
+        # Should not happen via message, but handle gracefully
+        return "Still setting up your coaches, give me a moment..."
     elif step == "level_assessment":
         return await _step_level_assessment(state, user_message)
     elif step == "schedule":
@@ -63,124 +50,129 @@ async def _step_greeting(state: dict) -> str:
 
 async def _step_goals(state: dict, message: str) -> str:
     state["raw_situation"] = message
-    state["step"] = "domains"
+    state["step"] = "topics"
     save_onboarding_state(state)
     return (
         "Got it.\n\n"
-        "*Which areas do you want to focus on?* Reply with the numbers, e.g. `1 3` for DSA and System Design:\n\n"
-        "1. DSA (Data Structures and Algorithms)\n"
-        "2. Machine Learning\n"
-        "3. System Design\n"
-        "4. AI Engineering (building with LLMs and APIs)\n\n"
-        "You can pick 1 to 4."
+        "*What do you want to learn?* List the topics or skills, separated by commas.\n\n"
+        "You can say anything, DSA, System Design, Machine Learning, React, Rust, DevOps, "
+        "Competitive Programming, Web3, whatever you need. No restrictions.\n\n"
+        "Example: `DSA, System Design, AI Engineering`\n"
+        "Or: `React, TypeScript, Node.js`\n"
+        "Or: `Competitive Programming, Math for CS`"
     )
 
 
-async def _step_domains(state: dict, message: str) -> str:
-    selected = []
-    for char in message.strip():
-        if char in DOMAIN_OPTIONS:
-            domain = DOMAIN_OPTIONS[char]
-            if domain not in selected:
-                selected.append(domain)
+async def _step_topics(state: dict, message: str) -> str:
+    # Parse topics from comma-separated input
+    raw_topics = [t.strip() for t in message.split(",") if t.strip()]
 
-    if not selected:
-        return "Didn't catch that. Reply with numbers like `1 3` to select your domains."
+    if not raw_topics:
+        return "Didn't catch that. List your topics separated by commas, e.g. `DSA, System Design`."
 
-    state["domains"] = selected
-    state["current_domain_index"] = 0
+    if len(raw_topics) > 6:
+        return (
+            f"That's {len(raw_topics)} topics, which is a lot to cover well. "
+            "Pick up to 6 that matter most right now and reply again."
+        )
+
+    state["raw_topics"] = raw_topics
+    state["step"] = "generating_personas"
+    state["current_assessment_index"] = 0
     state["level_assessments"] = {}
+    state["generated_domains"] = []
+    save_onboarding_state(state)
+
+    # Generate personas for all topics
+    topics_list = ", ".join(raw_topics)
+    generating_msg = (
+        f"Building your coaches for: *{topics_list}*\n\n"
+        "Give me a moment to set them up..."
+    )
+
+    # Actually generate them (this is async, happens before we reply)
+    failed = []
+    for topic in raw_topics:
+        try:
+            persona_data = await generate_persona(topic)
+            save_persona(persona_data["key"], persona_data)
+            state["generated_domains"].append({
+                "key": persona_data["key"],
+                "display_name": persona_data["display_name"],
+                "original_topic": topic,
+            })
+        except Exception as e:
+            failed.append(topic)
+
+    if not state["generated_domains"]:
+        state["step"] = "topics"
+        save_onboarding_state(state)
+        return "Something went wrong setting up your coaches. Try again with your topics."
+
     state["step"] = "level_assessment"
     save_onboarding_state(state)
 
-    return await _ask_level_for_domain(state)
+    if failed:
+        failed_str = ", ".join(failed)
+        result = f"Set up coaches for most topics. Skipped: {failed_str} (you can add them later).\n\n"
+    else:
+        result = "All coaches ready.\n\n"
+
+    return result + await _ask_level_for_current_domain(state)
 
 
-async def _ask_level_for_domain(state: dict) -> str:
-    domains = state["domains"]
-    idx = state.get("current_domain_index", 0)
+async def _ask_level_for_current_domain(state: dict) -> str:
+    domains = state["generated_domains"]
+    idx = state.get("current_assessment_index", 0)
     domain = domains[idx]
 
-    domain_display = {
-        "dsa": "DSA", "ml": "Machine Learning",
-        "system_design": "System Design", "ai_engineering": "AI Engineering"
-    }
+    question = get_assessment_question(domain["key"])
 
-    assessment_questions = {
-        "dsa": (
-            "*DSA level check*\n\n"
-            "Given an array `[3,1,4,1,5,9,2,6]`, describe how you'd find two numbers that add up to a target sum.\n\n"
-            "Just explain your approach, no need to write full code."
-        ),
-        "ml": (
-            "*ML level check*\n\n"
-            "What is overfitting, and how would you detect and fix it?"
-        ),
-        "system_design": (
-            "*System Design level check*\n\n"
-            "If you had to design a URL shortener like bit.ly, what are the first 3 components you'd think about?"
-        ),
-        "ai_engineering": (
-            "*AI Engineering level check*\n\n"
-            "What is RAG (Retrieval-Augmented Generation) and when would you use it instead of fine-tuning?"
-        ),
-    }
-
-    msg = f"Let me check your level in *{domain_display[domain]}*.\n\n"
-    msg += assessment_questions[domain]
+    msg = f"*{domain['display_name']} level check*\n\n"
+    msg += question
     msg += "\n\n_Take your time. There's no wrong answer here._"
     return msg
 
 
 async def _step_level_assessment(state: dict, message: str) -> str:
-    domains = state["domains"]
-    idx = state.get("current_domain_index", 0)
+    domains = state["generated_domains"]
+    idx = state.get("current_assessment_index", 0)
     domain = domains[idx]
 
-    domain_display = {
-        "dsa": "DSA", "ml": "Machine Learning",
-        "system_design": "System Design", "ai_engineering": "AI Engineering"
-    }
-
-    assessment_prompt = f"""A student is learning {domain_display[domain]}. I asked them an assessment question and they responded.
+    assessment_prompt = f"""A student wants to learn {domain['display_name']}. I asked them an assessment question and they responded.
 
 Their response: "{message}"
 
-Based on this response, rate their current level on a scale of 1-10 where:
+Rate their current level on a scale of 1-10 where:
 - 1-3: Beginner (minimal knowledge)
 - 4-6: Intermediate (knows basics, some gaps)
 - 7-8: Advanced (solid understanding)
 - 9-10: Expert level
 
-Respond with ONLY a JSON object like this:
-{{"level": 4, "reasoning": "one sentence explanation", "strengths": ["what they know"], "gaps": ["what to improve"]}}"""
+Respond with ONLY a JSON object:
+{{"level": 4, "reasoning": "one sentence", "strengths": ["what they know"], "gaps": ["what to improve"]}}"""
 
     try:
         result = await run_claude(assessment_prompt, timeout=60)
-        start = result.find("{")
-        end = result.rfind("}") + 1
-        if start >= 0 and end > start:
-            assessment = json.loads(result[start:end])
-        else:
-            assessment = {"level": 3, "reasoning": "Could not parse response", "strengths": [], "gaps": []}
+        start, end = result.find("{"), result.rfind("}") + 1
+        assessment = json.loads(result[start:end]) if start >= 0 else {"level": 3, "strengths": [], "gaps": []}
     except Exception:
-        assessment = {"level": 3, "reasoning": "Assessment error", "strengths": [], "gaps": []}
+        assessment = {"level": 3, "strengths": [], "gaps": []}
 
-    state["level_assessments"][domain] = assessment
-    state["current_domain_index"] = idx + 1
+    state["level_assessments"][domain["key"]] = assessment
+    state["current_assessment_index"] = idx + 1
     save_onboarding_state(state)
 
     level = assessment["level"]
-    feedback = f"*{domain_display[domain]}:* placing you at level *{level}/10*.\n"
+    feedback = f"*{domain['display_name']}:* placing you at level *{level}/10*.\n"
     if assessment.get("strengths"):
         feedback += f"Strong on: {', '.join(assessment['strengths'][:2])}\n"
     if assessment.get("gaps"):
         feedback += f"To work on: {', '.join(assessment['gaps'][:2])}\n"
 
-    if state["current_domain_index"] < len(domains):
-        save_onboarding_state(state)
-        next_question = await _ask_level_for_domain(state)
-        return feedback + "\n\n" + next_question
+    if state["current_assessment_index"] < len(domains):
+        next_q = await _ask_level_for_current_domain(state)
+        return feedback + "\n\n" + next_q
     else:
         state["step"] = "schedule"
         save_onboarding_state(state)
@@ -197,20 +189,15 @@ async def _step_schedule(state: dict, message: str) -> str:
     state["step"] = "confirm"
     save_onboarding_state(state)
 
-    domains = state["domains"]
+    domains = state["generated_domains"]
     assessments = state["level_assessments"]
-
-    domain_display = {
-        "dsa": "DSA", "ml": "Machine Learning",
-        "system_design": "System Design", "ai_engineering": "AI Engineering"
-    }
 
     summary = "*Here's your plan:*\n\n"
     summary += f"*Situation:* {state.get('raw_situation', 'Not specified')}\n\n"
-    summary += "*Domains and levels:*\n"
+    summary += "*Topics and levels:*\n"
     for d in domains:
-        lvl = assessments.get(d, {}).get("level", "?")
-        summary += f"- {domain_display[d]}: Level {lvl}/10\n"
+        lvl = assessments.get(d["key"], {}).get("level", "?")
+        summary += f"- {d['display_name']}: Level {lvl}/10\n"
     summary += f"\n*Schedule:* {message}\n\n"
     summary += "Reply *yes* to confirm and I'll build your roadmap. Or tell me what to change."
 
@@ -221,29 +208,25 @@ async def _step_confirm(state: dict, message: str) -> str:
     if not any(w in message.lower() for w in ["yes", "yeah", "ok", "sure", "go", "yep"]):
         state["step"] = "schedule"
         save_onboarding_state(state)
-        return "Alright, what schedule works better for you?"
+        return "What schedule works better for you?"
 
-    domains = state["domains"]
+    domains = state["generated_domains"]
     assessments = state["level_assessments"]
     situation = state.get("raw_situation", "")
     raw_schedule = state.get("raw_schedule", "every 3 hours")
 
-    domain_display = {
-        "dsa": "DSA", "ml": "Machine Learning",
-        "system_design": "System Design", "ai_engineering": "AI Engineering"
-    }
-
     domain_summaries = "\n".join(
-        f"- {domain_display[d]}: current level {assessments.get(d, {}).get('level', 3)}/10"
+        f"- {d['display_name']}: current level {assessments.get(d['key'], {}).get('level', 3)}/10"
         for d in domains
     )
+    domain_keys = [d["key"] for d in domains]
 
     roadmap_prompt = f"""Create a structured learning roadmap for a student with this profile:
 Situation: {situation}
-Domains and current levels:
+Topics and current levels:
 {domain_summaries}
 
-For each domain, create 5-8 topics ordered by progression from their current level to advanced.
+For each topic, create 5-8 subtopics ordered by progression from their current level to advanced.
 
 Respond with ONLY a JSON object in this exact format:
 {{
@@ -261,12 +244,11 @@ Respond with ONLY a JSON object in this exact format:
   }}
 }}
 
-Domain keys must be from: {domains}"""
+Domain keys must be from: {domain_keys}"""
 
     try:
         result = await run_claude(roadmap_prompt, timeout=90)
-        start = result.find("{")
-        end = result.rfind("}") + 1
+        start, end = result.find("{"), result.rfind("}") + 1
         roadmap_data = json.loads(result[start:end]) if start >= 0 else {}
     except Exception:
         roadmap_data = {}
@@ -276,7 +258,8 @@ Domain keys must be from: {domains}"""
     profile = {
         "onboarded": True,
         "situation": situation,
-        "domains": domains,
+        "domains": domain_keys,
+        "domain_display": {d["key"]: d["display_name"] for d in domains},
         "assessments": assessments,
         "onboarded_at": datetime.now().isoformat(),
     }
@@ -290,17 +273,18 @@ Domain keys must be from: {domains}"""
     save_schedule_config(schedule_config)
 
     update_profile_in_tracker("situation", situation)
-    update_profile_in_tracker("domains", ", ".join(domain_display[d] for d in domains))
+    update_profile_in_tracker("topics", ", ".join(d["display_name"] for d in domains))
     update_profile_in_tracker("onboarded_at", datetime.now().isoformat())
 
     for d in domains:
-        lvl = assessments.get(d, {}).get("level", 3)
-        update_profile_in_tracker(f"{d}_initial_level", str(lvl))
-        topics = roadmap_data.get("domains", {}).get(d, {}).get("topics", [])
+        key = d["key"]
+        lvl = assessments.get(key, {}).get("level", 3)
+        update_profile_in_tracker(f"{key}_initial_level", str(lvl))
+        topics = roadmap_data.get("domains", {}).get(key, {}).get("topics", [])
         for t in topics:
             update_roadmap(
                 topic=t["topic"],
-                domain=d,
+                domain=key,
                 level_target=t.get("level_target", lvl + 2),
                 current_level=lvl,
                 status="not_started",
@@ -311,13 +295,13 @@ Domain keys must be from: {domains}"""
     state["step"] = "done"
     save_onboarding_state(state)
 
-    domains_list = ", ".join(domain_display[d] for d in domains)
+    topics_list = ", ".join(d["display_name"] for d in domains)
     interval = schedule_config.get("interval_hours", 3)
 
     return (
         f"*You're set.*\n\n"
-        f"Roadmap built for: *{domains_list}*\n"
-        f"Concepts and challenges will come every *{interval} hours*.\n\n"
+        f"Roadmap built for: *{topics_list}*\n"
+        f"Concepts and challenges every *{interval} hours*.\n\n"
         f"Commands:\n"
         f"/challenge, get a practice problem now\n"
         f"/concept, get a concept explained\n"

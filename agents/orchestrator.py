@@ -5,28 +5,27 @@ import random
 from datetime import datetime
 from core import (
     run_claude,
-    get_user_profile, update_user_profile,
+    get_user_profile,
     get_conversation_history, append_message,
-    get_roadmap, get_schedule_config,
-    is_onboarded,
+    get_roadmap, is_onboarded,
     log_session, log_challenge, log_concept,
     update_roadmap as tracker_update_roadmap,
     get_roadmap_summary,
 )
-from agents.personas import COACH_BASE, DOMAIN_PERSONAS, DOMAIN_DISPLAY
+from agents.personas import (
+    COACH_BASE,
+    get_persona, get_persona_display, get_all_domain_keys, get_all_personas,
+)
 from agents.onboarding import handle_onboarding
 
 
 async def handle_message(user_message: str) -> str:
-    """Route an incoming Telegram message and return the bot's response."""
     if not is_onboarded():
         return await handle_onboarding(user_message)
 
-    # Handle slash commands
     if user_message.startswith("/"):
         return await handle_command(user_message)
 
-    # Conversational flow
     return await handle_chat(user_message)
 
 
@@ -39,6 +38,7 @@ async def handle_command(command: str) -> str:
         "/status": cmd_status,
         "/help": cmd_help,
         "/topic": cmd_topic,
+        "/domains": cmd_domains,
     }
     handler = handlers.get(cmd)
     if handler:
@@ -50,24 +50,18 @@ async def handle_chat(user_message: str) -> str:
     profile = get_user_profile()
     history = get_conversation_history()
 
-    # Detect if the user is responding to a challenge
     if _is_challenge_response(history, user_message):
         return await evaluate_challenge_response(user_message, history, profile)
 
-    # General coaching chat
     append_message("user", user_message)
     history = get_conversation_history()
 
     system = _build_coach_system(profile)
-    response = await run_claude(
-        _format_history_prompt(history),
-        system=system,
-        timeout=90,
-    )
+    response = await run_claude(_format_history_prompt(history), system=system, timeout=90)
 
     append_message("assistant", response)
     log_session(
-        domain=_detect_domain_from_context(history),
+        domain=_detect_domain_from_context(history, profile),
         topic="general",
         session_type="chat",
         summary=user_message[:100],
@@ -81,16 +75,16 @@ def _is_challenge_response(history: list, message: str) -> bool:
     last_assistant = next(
         (m["content"] for m in reversed(history) if m["role"] == "assistant"), ""
     )
-    challenge_markers = ["take your time", "reply with your approach", "try this", "your turn", "solve this"]
-    return any(marker in last_assistant.lower() for marker in challenge_markers)
+    markers = ["take your time", "reply with your approach", "try this", "your turn", "solve this"]
+    return any(m in last_assistant.lower() for m in markers)
 
 
 async def evaluate_challenge_response(response: str, history: list, profile: dict) -> str:
     last_challenge = next(
         (m["content"] for m in reversed(history) if m["role"] == "assistant"), ""
     )
-    domain = _detect_domain_from_context(history)
-    persona = DOMAIN_PERSONAS.get(domain, "")
+    domain = _detect_domain_from_context(history, profile)
+    persona = get_persona(domain)
 
     eval_prompt = f"""A student is attempting a challenge. Evaluate their response.
 
@@ -106,8 +100,8 @@ Evaluate with:
 3. A score from 1-10
 4. A brief next-level hint or follow-up
 
-Keep it under 250 words. Be encouraging. Format for Telegram (no markdown headers).
-End with either another follow-up challenge or confirm they've mastered this and move on.
+Keep it under 250 words. Be direct. Format for Telegram, no markdown headers.
+End with either a follow-up challenge or confirm they've mastered this and move on.
 
 Respond with JSON:
 {{"evaluation": "your evaluation text", "score": 7, "topic": "topic name", "mastered": false}}"""
@@ -119,7 +113,7 @@ Respond with JSON:
     except Exception:
         data = {"evaluation": response, "score": 5, "topic": "general", "mastered": False}
 
-    evaluation_text = data.get("evaluation", "Good attempt! Keep going.")
+    evaluation_text = data.get("evaluation", "Good attempt. Keep going.")
     score = data.get("score", 5)
     topic = data.get("topic", "general")
 
@@ -160,29 +154,34 @@ def _mark_topic_progress(domain: str, topic: str, profile: dict):
 
 async def cmd_challenge(command: str) -> str:
     profile = get_user_profile()
-    domains = profile.get("domains", ["dsa"])
+    domains = profile.get("domains", [])
     assessments = profile.get("assessments", {})
 
-    # Pick domain (rotate or from command arg)
+    if not domains:
+        return "No domains set up yet. Complete onboarding first."
+
     parts = command.split()
-    domain = parts[1].lower() if len(parts) > 1 and parts[1].lower() in DOMAIN_PERSONAS else random.choice(domains)
+    # Match arg against known domain keys or display names
+    domain = _resolve_domain_arg(parts[1] if len(parts) > 1 else None, domains, profile)
     level = assessments.get(domain, {}).get("level", 3)
 
     roadmap = get_roadmap()
     topics = roadmap.get("domains", {}).get(domain, {}).get("topics", [])
     topic = topics[0]["topic"] if topics else "fundamentals"
 
-    persona = DOMAIN_PERSONAS.get(domain, "")
+    persona = get_persona(domain)
+    display = get_persona_display(domain)
+
     challenge_prompt = f"""Generate a focused practice challenge for a student.
-Domain: {DOMAIN_DISPLAY.get(domain, domain)}
+Domain: {display}
 Topic: {topic}
 Student level: {level}/10
 
 Requirements:
-- The challenge should be appropriately difficult for level {level}
-- Include any necessary context/setup
+- Appropriately difficult for level {level}
+- Include any necessary context or setup
 - End with: "Take your time. Reply with your approach, code, pseudocode, or just your thinking."
-- Keep it under 200 words total
+- Keep it under 200 words
 
 Output only the challenge message, nothing else."""
 
@@ -194,29 +193,33 @@ Output only the challenge message, nothing else."""
 
 async def cmd_concept(command: str) -> str:
     profile = get_user_profile()
-    domains = profile.get("domains", ["dsa"])
+    domains = profile.get("domains", [])
     assessments = profile.get("assessments", {})
 
+    if not domains:
+        return "No domains set up yet. Complete onboarding first."
+
     parts = command.split()
-    domain = parts[1].lower() if len(parts) > 1 and parts[1].lower() in DOMAIN_PERSONAS else random.choice(domains)
+    domain = _resolve_domain_arg(parts[1] if len(parts) > 1 else None, domains, profile)
     level = assessments.get(domain, {}).get("level", 3)
 
     roadmap = get_roadmap()
     topics = roadmap.get("domains", {}).get(domain, {}).get("topics", [])
 
-    # Find next not-mastered topic
     summary = get_roadmap_summary()
     in_progress = [t for t in summary if t["domain"] == domain and t["status"] != "mastered"]
     topic = in_progress[0]["topic"] if in_progress else (topics[0]["topic"] if topics else "fundamentals")
 
-    persona = DOMAIN_PERSONAS.get(domain, "")
-    concept_prompt = f"""Explain a concept for a student learning {DOMAIN_DISPLAY.get(domain, domain)}.
+    persona = get_persona(domain)
+    display = get_persona_display(domain)
+
+    concept_prompt = f"""Explain a concept for a student learning {display}.
 Topic: {topic}
 Student level: {level}/10
 
 Format for Telegram:
 - Start with a one-liner "what is it"
-- Give the core idea in 3-4 bullet points
+- Core idea in 3-4 bullet points
 - One concrete example (code snippet if relevant, keep it short)
 - One "why it matters" point
 - End with a question to check understanding
@@ -239,17 +242,18 @@ async def cmd_progress(command: str) -> str:
 
     msg = "*Your Progress*\n\n"
     for domain in domains:
+        display = get_persona_display(domain)
         domain_topics = [t for t in summary if t["domain"] == domain]
         if not domain_topics:
             continue
         total = len(domain_topics)
         done = sum(1 for t in domain_topics if t["status"] == "mastered")
         current_level = profile.get("assessments", {}).get(domain, {}).get("level", 1)
-        msg += f"*{DOMAIN_DISPLAY.get(domain, domain)}* (Level {current_level}/10)\n"
+        msg += f"*{display}* (Level {current_level}/10)\n"
         msg += f"  {done}/{total} topics mastered\n"
-        in_progress = [t for t in domain_topics if t["status"] == "in_progress"]
-        if in_progress:
-            msg += f"  Currently on: {in_progress[0]['topic']}\n"
+        in_prog = [t for t in domain_topics if t["status"] == "in_progress"]
+        if in_prog:
+            msg += f"  Currently on: {in_prog[0]['topic']}\n"
         msg += "\n"
 
     return msg.strip()
@@ -264,21 +268,26 @@ async def cmd_status(command: str) -> str:
     for d in domains:
         lvl = assessments.get(d, {}).get("level", 1)
         bar = "█" * lvl + "░" * (10 - lvl)
-        msg += f"{DOMAIN_DISPLAY.get(d, d)}: `{bar}` {lvl}/10\n"
+        msg += f"{get_persona_display(d)}: `{bar}` {lvl}/10\n"
 
     return msg.strip()
 
 
 async def cmd_help(command: str) -> str:
+    profile = get_user_profile()
+    domains = profile.get("domains", [])
+    domain_list = ", ".join(get_persona_display(d).lower() for d in domains) if domains else "your topics"
+
     return (
         "*Commands*\n\n"
         "/challenge, get a practice problem\n"
-        "/challenge dsa, challenge for a specific domain\n"
+        f"/challenge {domain_list.split(',')[0].strip() if domains else 'topic'}, challenge for a specific topic\n"
         "/concept, get a concept explained\n"
-        "/concept ml, concept for a specific domain\n"
+        "/concept <topic>, concept for a specific topic\n"
         "/progress, full roadmap progress\n"
         "/status, quick level overview\n"
-        "/topic, see what's next on your roadmap\n\n"
+        "/topic, see what's next on your roadmap\n"
+        "/domains, list all your configured topics\n\n"
         "Or just chat, ask questions, work through topics, whatever you need."
     )
 
@@ -292,16 +301,48 @@ async def cmd_topic(command: str) -> str:
     for domain in domains:
         pending = [t for t in summary if t["domain"] == domain and t["status"] != "mastered"]
         if pending:
-            next_t = pending[0]
-            msg += f"*{DOMAIN_DISPLAY.get(domain, domain)}:* {next_t['topic']}\n"
+            msg += f"*{get_persona_display(domain)}:* {pending[0]['topic']}\n"
     return msg.strip()
+
+
+async def cmd_domains(command: str) -> str:
+    profile = get_user_profile()
+    domains = profile.get("domains", [])
+    assessments = profile.get("assessments", {})
+
+    if not domains:
+        return "No topics configured yet."
+
+    msg = "*Your Topics*\n\n"
+    for d in domains:
+        lvl = assessments.get(d, {}).get("level", 1)
+        msg += f"- *{get_persona_display(d)}* (level {lvl}/10)\n"
+    return msg.strip()
+
+
+def _resolve_domain_arg(arg: str | None, domains: list, profile: dict) -> str:
+    """Match a command argument to a domain key. Falls back to random choice."""
+    if not arg:
+        return random.choice(domains)
+
+    arg_lower = arg.lower()
+    # Exact key match
+    if arg_lower in domains:
+        return arg_lower
+    # Partial display name match
+    domain_display = profile.get("domain_display", {})
+    for key in domains:
+        display = domain_display.get(key, key).lower()
+        if arg_lower in display or display in arg_lower:
+            return key
+    return random.choice(domains)
 
 
 def _build_coach_system(profile: dict) -> str:
     domains = profile.get("domains", [])
     assessments = profile.get("assessments", {})
     topics_str = ", ".join(
-        f"{DOMAIN_DISPLAY.get(d, d)} (level {assessments.get(d, {}).get('level', 1)}/10)"
+        f"{get_persona_display(d)} (level {assessments.get(d, {}).get('level', 1)}/10)"
         for d in domains
     )
     return COACH_BASE.format(
@@ -313,20 +354,25 @@ def _build_coach_system(profile: dict) -> str:
 
 def _format_history_prompt(history: list) -> str:
     lines = []
-    for m in history[-10:]:  # last 10 messages to control tokens
+    for m in history[-10:]:
         role = "User" if m["role"] == "user" else "Assistant"
         lines.append(f"{role}: {m['content']}")
     return "\n\n".join(lines) + "\n\nContinue as the assistant."
 
 
-def _detect_domain_from_context(history: list) -> str:
+def _detect_domain_from_context(history: list, profile: dict) -> str:
+    """Try to detect the active domain from recent conversation context."""
+    domains = profile.get("domains", [])
+    if not domains:
+        return "general"
+
     recent = " ".join(m["content"].lower() for m in history[-4:])
-    if any(k in recent for k in ["array", "tree", "graph", "dsa", "algorithm", "complexity", "leetcode"]):
-        return "dsa"
-    if any(k in recent for k in ["neural", "model", "training", "ml", "machine learning", "regression", "classification"]):
-        return "ml"
-    if any(k in recent for k in ["system design", "scale", "load balancer", "database", "distributed"]):
-        return "system_design"
-    if any(k in recent for k in ["llm", "rag", "prompt", "embedding", "fine-tune", "agent", "ai engineering"]):
-        return "ai_engineering"
-    return "dsa"
+    domain_display = profile.get("domain_display", {})
+
+    # Check if any domain's display name or key appears in recent messages
+    for key in domains:
+        display = domain_display.get(key, key).lower()
+        if key in recent or display in recent:
+            return key
+
+    return random.choice(domains)
