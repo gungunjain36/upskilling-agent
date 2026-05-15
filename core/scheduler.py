@@ -81,7 +81,8 @@ async def _deliver_concept_job():
         profile = get_user_profile()
         domains = profile.get("domains", ["dsa"])
         domain = random.choice(domains)
-        message = await cmd_concept(f"/concept {domain}")
+        # save_state=False so cron delivery never overwrites the user's active challenge context
+        message = await cmd_concept(f"/concept {domain}", save_state=False)
         await _send_callback(message)
         log_session(domain=domain, topic="scheduled", session_type="concept_delivery", summary="Scheduled concept sent")
     except Exception as e:

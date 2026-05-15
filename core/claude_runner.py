@@ -7,6 +7,10 @@ from config import settings
 CONTEXT_HANDOVER_THRESHOLD = 80  # % used before we summarize and start a new session
 
 
+class _SessionExpiredError(Exception):
+    pass
+
+
 async def _run_subprocess(cmd: list, timeout: int) -> subprocess.CompletedProcess:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
@@ -36,8 +40,13 @@ async def _call_claude_raw(prompt: str, session_id: Optional[str], timeout: int)
             "Ensure Claude Code is installed and in PATH."
         )
 
-    if result.returncode != 0 and result.stderr:
-        raise RuntimeError(f"Claude CLI error: {result.stderr.strip()}")
+    if result.returncode != 0:
+        stderr = result.stderr.strip() if result.stderr else ""
+        # Session-related failures should be retried by the caller without session_id
+        if session_id and ("session" in stderr.lower() or "resume" in stderr.lower() or not stderr):
+            raise _SessionExpiredError(f"Session {session_id} invalid")
+        if stderr:
+            raise RuntimeError(f"Claude CLI error: {stderr}")
 
     try:
         data = json.loads(result.stdout.strip())
@@ -107,7 +116,22 @@ async def run_claude_in_session(
         full_prompt = prompt
 
     # --- Call Claude ---
-    data = await _call_claude_raw(full_prompt, session_id=session_id, timeout=timeout)
+    try:
+        data = await _call_claude_raw(full_prompt, session_id=session_id, timeout=timeout)
+    except _SessionExpiredError:
+        # Stale session (e.g. bot restarted). Clear it and retry as a new session.
+        clear_session()
+        session_id = None
+        is_new_session = True
+        prior_summary = get_session_summary()
+        parts = []
+        if system:
+            parts.append(f"<system_instructions>\n{system}\n</system_instructions>")
+        if prior_summary:
+            parts.append(f"<context_from_previous_session>\n{prior_summary}\n</context_from_previous_session>")
+        parts.append(prompt)
+        full_prompt = "\n\n".join(parts)
+        data = await _call_claude_raw(full_prompt, session_id=None, timeout=timeout)
 
     # --- Persist session state ---
     new_session_id = data.get("session_id") or session_id

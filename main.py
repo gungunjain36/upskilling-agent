@@ -3,7 +3,6 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from bot.telegram_bot import setup_bot
-from core.scheduler import start_scheduler
 from core.tracker import init_tracker
 
 logging.basicConfig(
@@ -19,10 +18,8 @@ async def lifespan(app: FastAPI):
     init_tracker()
 
     telegram_app = setup_bot()
-    await telegram_app.initialize()
+    await telegram_app.initialize()  # triggers post_init: registers commands + starts scheduler
     await telegram_app.start()
-
-    start_scheduler()
 
     # Start polling in background
     asyncio.create_task(telegram_app.updater.start_polling(drop_pending_updates=True))

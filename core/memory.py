@@ -126,3 +126,16 @@ def get_last_response() -> str:
 
 def save_last_response(content: str):
     write_json_memory("last_response.json", {"content": content})
+
+
+def get_pending_challenge() -> str:
+    data = read_json_memory("pending_challenge.json")
+    return data.get("content", "")
+
+
+def save_pending_challenge(content: str):
+    write_json_memory("pending_challenge.json", {"content": content})
+
+
+def clear_pending_challenge():
+    write_json_memory("pending_challenge.json", {})

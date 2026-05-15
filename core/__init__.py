@@ -9,6 +9,7 @@ from .memory import (
     get_session, save_session, clear_session,
     get_session_summary, save_session_summary,
     get_last_response, save_last_response,
+    get_pending_challenge, save_pending_challenge, clear_pending_challenge,
 )
 from .tracker import (
     init_tracker, log_session, log_concept, log_challenge,
@@ -26,6 +27,7 @@ __all__ = [
     "get_session", "save_session", "clear_session",
     "get_session_summary", "save_session_summary",
     "get_last_response", "save_last_response",
+    "get_pending_challenge", "save_pending_challenge", "clear_pending_challenge",
     "init_tracker", "log_session", "log_concept", "log_challenge",
     "update_roadmap", "update_profile_in_tracker", "get_roadmap_summary",
 ]
