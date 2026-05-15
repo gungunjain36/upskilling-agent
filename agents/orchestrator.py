@@ -21,39 +21,37 @@ from agents.personas import (
 from agents.onboarding import handle_onboarding
 
 
-# --- Intent classification ---
+# --- Intent classification (keyword-based, no extra subprocess) ---
 
-_INTENT_SYSTEM = """\
-You classify messages for a coding/skills learning coaching bot. Output JSON only, no prose.
-
-Intents:
-- "challenge": user wants a practice problem, coding exercise, or quiz
-- "concept": user wants something explained, wants to learn/understand a topic, or asks "how does X work"
-- "eval": user is answering or responding to a previously asked challenge or question
-- "progress": user asks about their progress, stats, levels, or how they're doing
-- "help": user asks what they can do or what commands exist
-- "chat": general conversation, questions not covered above, or unclear
-
-Also extract:
-- topic: specific topic or technology if mentioned, null otherwise
-- domain_hint: closest learning domain if identifiable, null otherwise
-
-Output only valid JSON: {"intent": "chat", "topic": null, "domain_hint": null}"""
+_CHALLENGE_WORDS = {"challenge", "practice", "problem", "exercise", "quiz", "drill", "test me"}
+_CONCEPT_WORDS = {"explain", "what is", "what are", "how does", "how do", "how is", "tell me about", "teach me", "concept", "understand", "clarify"}
+_PROGRESS_WORDS = {"progress", "how am i doing", "my stats", "my level", "my score", "roadmap status"}
+_HELP_WORDS = {"help", "what can i do", "commands", "what commands"}
 
 
-async def _classify_intent(message: str, has_pending: bool) -> dict:
-    hint = " Note: there is a pending challenge the user may be responding to." if has_pending else ""
-    try:
-        result = await run_claude(
-            f"Message: {message}{hint}",
-            system=_INTENT_SYSTEM,
-            timeout=20,
-        )
-        start, end = result.find("{"), result.rfind("}") + 1
-        if start >= 0:
-            return json.loads(result[start:end])
-    except Exception:
-        pass
+def _classify_intent(message: str, has_pending: bool) -> dict:
+    lower = message.lower().strip()
+
+    # Don't override if user is clearly asking for something new
+    is_new_request = any(lower.startswith(w) or f" {w} " in lower or lower == w for w in
+                         _CHALLENGE_WORDS | {"explain", "what is", "what are", "how does", "how do"})
+
+    # If there's a pending challenge and the message doesn't look like a new request, treat as eval
+    if has_pending and not is_new_request:
+        return {"intent": "eval", "topic": None, "domain_hint": None}
+
+    if any(w in lower for w in _CHALLENGE_WORDS):
+        return {"intent": "challenge", "topic": None, "domain_hint": None}
+
+    if any(lower.startswith(w) or w in lower for w in _CONCEPT_WORDS):
+        return {"intent": "concept", "topic": None, "domain_hint": None}
+
+    if any(w in lower for w in _PROGRESS_WORDS):
+        return {"intent": "progress", "topic": None, "domain_hint": None}
+
+    if any(w in lower for w in _HELP_WORDS):
+        return {"intent": "help", "topic": None, "domain_hint": None}
+
     return {"intent": "chat", "topic": None, "domain_hint": None}
 
 
@@ -93,8 +91,8 @@ async def handle_chat(user_message: str, reply_context: str | None = None) -> st
     pending = get_pending_challenge()
     challenge_context = reply_context or pending
 
-    # Classify intent so natural language works
-    intent_data = await _classify_intent(user_message, bool(challenge_context))
+    # Classify intent so natural language works (keyword-based, no extra API call)
+    intent_data = _classify_intent(user_message, bool(challenge_context))
     intent = intent_data.get("intent", "chat")
     topic = intent_data.get("topic")
     domain_hint = intent_data.get("domain_hint")

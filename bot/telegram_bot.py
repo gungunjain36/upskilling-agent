@@ -88,11 +88,15 @@ async def _route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = await handle_message(user_text, reply_context=reply_context)
+        if not response or not response.strip():
+            raise RuntimeError("Empty response from Claude CLI — check that the CLI is working")
         await update.message.reply_text(response, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Error handling message: {e}", exc_info=True)
+        err_preview = str(e)[:300].replace("*", "").replace("`", "").replace("_", "")
         await update.message.reply_text(
-            "Hit an error on my end — give it a moment and try again."
+            f"Error: {type(e).__name__}\n{err_preview}",
+            parse_mode=None,
         )
 
 
